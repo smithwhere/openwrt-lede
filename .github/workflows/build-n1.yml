@@ -61,15 +61,13 @@ jobs:
             CONFIG_TARGET_armsr_armv8_DEVICE_generic=y \
             CONFIG_PACKAGE_luci-app-passwall=y \
             CONFIG_PACKAGE_luci-app-passwall2=y \
-            CONFIG_PACKAGE_luci-app-ssr-plus=y \
             CONFIG_PACKAGE_sing-box=y \
             CONFIG_PACKAGE_xray-core=y \
             CONFIG_PACKAGE_hysteria=y \
-            CONFIG_PACKAGE_chinadns-ng=y \
             CONFIG_PACKAGE_geoview=y; do
             grep -Fqx "$option" .config || { echo "::error::Missing build selection: $option"; exit 1; }
           done
-          grep -E '^CONFIG_TARGET_armsr|^CONFIG_PACKAGE_(sing-box|xray-core|hysteria|chinadns-ng|geoview|luci-app-passwall|luci-app-passwall2|luci-app-ssr-plus)=' .config
+          grep -E '^CONFIG_TARGET_armsr|^CONFIG_PACKAGE_(sing-box|xray-core|hysteria|geoview|luci-app-passwall|luci-app-passwall2)=' .config
 
       - name: Download OpenWrt sources
         working-directory: openwrt
