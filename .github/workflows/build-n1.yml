@@ -1,0 +1,142 @@
+name: Build Phicomm N1 firmware
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and package N1 image
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 360
+    env:
+      OPENWRT_REF: 1d585dc90248b09ff61358e504edf2a302d3493a
+      N1_ROOT_PASSWORD: ${{ secrets.N1_ROOT_PASSWORD }}
+      N1_WIFI_PASSWORD: ${{ secrets.N1_WIFI_PASSWORD }}
+    steps:
+      - name: Checkout build configuration
+        uses: actions/checkout@v4
+
+      - name: Check Actions secrets
+        shell: bash
+        run: |
+          test -n "$N1_ROOT_PASSWORD" || { echo "::error::Add the N1_ROOT_PASSWORD Actions secret."; exit 1; }
+          test -n "$N1_WIFI_PASSWORD" || { echo "::error::Add the N1_WIFI_PASSWORD Actions secret."; exit 1; }
+
+      - name: Check self-hosted runner
+        shell: bash
+        run: |
+          sudo -n true || { echo "::error::The runner account must have non-interactive sudo for the pinned packer."; exit 1; }
+          free_gib=$(df -BG --output=avail "$GITHUB_WORKSPACE" | tail -n 1 | tr -dc '0-9')
+          echo "Available workspace disk: ${free_gib} GiB"
+          if [ "$free_gib" -lt 50 ]; then
+            echo "::error::At least 50 GiB free disk is required to build and package this firmware."
+            exit 1
+          fi
+          python3 --version
+          git --version
+          df -h "$GITHUB_WORKSPACE"
+
+      - name: Checkout pinned OpenWrt source
+        run: |
+          git init openwrt
+          git -C openwrt remote add origin https://github.com/coolsnowwolf/lede.git
+          git -C openwrt fetch --depth=1 origin "$OPENWRT_REF"
+          git -C openwrt checkout --detach FETCH_HEAD
+          test "$(git -C openwrt rev-parse HEAD)" = "$OPENWRT_REF"
+
+      - name: Apply feeds, package changes, and N1 overlay
+        run: |
+          python3 scripts/prepare-openwrt.py "$GITHUB_WORKSPACE/openwrt" "$GITHUB_WORKSPACE"
+          python3 scripts/render-wifi-secret.py "$GITHUB_WORKSPACE/openwrt/files"
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          ./scripts/feeds uninstall luci-app-fchomo || true
+          cp "$GITHUB_WORKSPACE/.config" .config
+          make defconfig
+          for option in \
+            CONFIG_TARGET_armsr_armv8_DEVICE_generic=y \
+            CONFIG_PACKAGE_luci-app-passwall=y \
+            CONFIG_PACKAGE_luci-app-passwall2=y \
+            CONFIG_PACKAGE_luci-app-ssr-plus=y \
+            CONFIG_PACKAGE_sing-box=y \
+            CONFIG_PACKAGE_xray-core=y \
+            CONFIG_PACKAGE_hysteria=y \
+            CONFIG_PACKAGE_chinadns-ng=y \
+            CONFIG_PACKAGE_geoview=y; do
+            grep -Fqx "$option" .config || { echo "::error::Missing build selection: $option"; exit 1; }
+          done
+          grep -E '^CONFIG_TARGET_armsr|^CONFIG_PACKAGE_(sing-box|xray-core|hysteria|chinadns-ng|geoview|luci-app-passwall|luci-app-passwall2|luci-app-ssr-plus)=' .config
+
+      - name: Download OpenWrt sources
+        working-directory: openwrt
+        run: make download -j8
+
+      - name: Compile generic ARMv8 rootfs
+        working-directory: openwrt
+        shell: bash
+        run: |
+          if ! make -j"$(nproc)"; then
+            echo "Parallel build failed; retrying serially with verbose output."
+            make -j1 V=s
+          fi
+          ROOTFS="bin/targets/armsr/armv8/openwrt-armsr-armv8-generic-rootfs.tar.gz"
+          test -s "$ROOTFS"
+          python3 ../scripts/set-root-password.py "$ROOTFS"
+          tar -tzf "$ROOTFS" > "$RUNNER_TEMP/n1-rootfs.list"
+          grep -q 'etc/init.d/n1-wireless-enforce' "$RUNNER_TEMP/n1-rootfs.list"
+          grep -q 'etc/uci-defaults/97-wireless-cn-channel149' "$RUNNER_TEMP/n1-rootfs.list"
+          grep -q 'etc/sysctl.d/99-ssr-bridge-netfilter.conf' "$RUNNER_TEMP/n1-rootfs.list"
+          echo "Rootfs overlay and root password checks passed."
+
+      - name: Checkout pinned N1 packer
+        uses: actions/checkout@v4
+        with:
+          repository: unifreq/openwrt_packit
+          ref: a46b4f5d201ab99eba0ddc7c2e7cd67412fc3d5c
+          path: packit
+
+      - name: Patch N1 packer and register it
+        run: |
+          python3 packaging/patch-packit.py "$GITHUB_WORKSPACE/packit"
+          sudo ln -s "$GITHUB_WORKSPACE/packit" /opt/openwrt_packit
+
+      - name: Package the Phicomm N1 image
+        uses: unifreq/openwrt_packit@a46b4f5d201ab99eba0ddc7c2e7cd67412fc3d5c
+        env:
+          OPENWRT_ARMSR: openwrt/bin/targets/armsr/armv8/openwrt-armsr-armv8-generic-rootfs.tar.gz
+          PACKAGE_SOC: diy
+          SCRIPT_DIY_PATH: packaging/mk-n1.sh
+          SELECT_PACKITPATH: openwrt_packit
+          SELECT_OUTPUTPATH: output
+          KERNEL_VERSION_NAME: 6.18.y
+          KERNEL_AUTO_LATEST: "true"
+          OPENWRT_IP: 192.168.1.1
+          OPENWRT_VER: R26.03.25
+          GZIP_IMGS: .gz
+          SAVE_OPENWRT_ROOTFS: "true"
+
+      - name: Verify and checksum firmware
+        shell: bash
+        run: |
+          shopt -s nullglob
+          images=(packit/output/openwrt_s905d_n1_*.img.gz)
+          test "${#images[@]}" -eq 1
+          gzip -t "${images[0]}"
+          sha256sum "${images[0]}" | tee packit/output/SHA256SUMS.txt
+          test -s packit/output/openwrt-armsr-armv8-generic-rootfs.tar.gz
+          ls -lh packit/output
+
+      - name: Upload N1 firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: n1-firmware
+          path: |
+            packit/output/openwrt_s905d_n1_*.img.gz
+            packit/output/SHA256SUMS.txt
+            packit/output/openwrt-armsr-armv8-generic-rootfs.tar.gz
+          if-no-files-found: error
+          retention-days: 14

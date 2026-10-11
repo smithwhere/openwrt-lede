@@ -1,0 +1,72 @@
+#!/bin/sh
+# Phicomm N1 bridge AP with standard OpenWrt management address.
+if [ ! -s /etc/config/wireless ]; then
+	/sbin/wifi config >/dev/null 2>&1 || true
+fi
+
+# The BCM43455 is attached over SDIO. Module loading can finish before the
+# radio appears in sysfs, so retry detection instead of silently consuming
+# this one-shot uci-defaults script without creating an AP.
+attempt=0
+radios=""
+while [ "$attempt" -lt 15 ]; do
+	radios="$(uci -q show wireless | sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p')"
+	[ -n "$radios" ] && break
+	/sbin/wifi config >/dev/null 2>&1 || true
+	sleep 1
+	attempt=$((attempt + 1))
+done
+
+if [ -z "$radios" ]; then
+	logger -t n1-wireless "No Wi-Fi radio detected; retaining first-boot setup for retry"
+	exit 1
+fi
+
+uci -q set network.br_lan='device'
+uci -q set network.br_lan.name='br-lan'
+uci -q set network.br_lan.type='bridge'
+uci -q add_list network.br_lan.ports='eth0'
+uci -q set network.lan.device='br-lan'
+uci -q set network.lan.proto='static'
+uci -q set network.lan.ipaddr='192.168.1.1'
+uci -q set network.lan.netmask='255.255.255.0'
+uci -q delete network.lan.gateway
+uci -q delete network.lan.dns
+uci -q delete dhcp.lan.ignore
+
+set -- $radios
+first_radio="$1"
+for radio in $radios; do
+	if [ "$radio" = "$first_radio" ]; then
+		uci -q set wireless.$radio.disabled='0'
+		uci -q set wireless.$radio.country='CN'
+		uci -q set wireless.$radio.band='5g'
+		uci -q set wireless.$radio.hwmode='11a'
+		uci -q set wireless.$radio.channel='149'
+		uci -q set wireless.$radio.htmode='HT40'
+	else
+		uci -q set wireless.$radio.disabled='1'
+	fi
+done
+
+ifaces="$(uci -q show wireless | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface$/\1/p')"
+set -- $ifaces
+first_iface="$1"
+if [ -z "$first_iface" ]; then
+	first_iface="$(uci add wireless wifi-iface)"
+fi
+for iface in $ifaces; do
+	[ "$iface" = "$first_iface" ] || uci -q set wireless.$iface.disabled='1'
+done
+uci -q set wireless.$first_iface.device="$first_radio"
+uci -q set wireless.$first_iface.mode='ap'
+uci -q set wireless.$first_iface.network='lan'
+uci -q set wireless.$first_iface.ssid='Phicomm_n1'
+uci -q set wireless.$first_iface.encryption='psk-mixed'
+uci -q set wireless.$first_iface.key='__N1_WIFI_PASSWORD__'
+uci -q set wireless.$first_iface.disabled='0'
+
+uci -q commit network
+uci -q commit dhcp
+uci -q commit wireless
+exit 0

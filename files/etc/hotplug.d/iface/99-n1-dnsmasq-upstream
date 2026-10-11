@@ -1,0 +1,28 @@
+#!/bin/sh
+# Follow the gateway configured on LAN; never assume a fixed main-router IP.
+[ "$INTERFACE" = "lan" ] || exit 0
+case "$ACTION" in
+        ifup|ifupdate) ;;
+        *) exit 0 ;;
+esac
+
+state=/etc/n1-dnsmasq-upstream.current
+old="$(cat "$state" 2>/dev/null)"
+gateway="$(uci -q get network.lan.gateway 2>/dev/null)"
+if ! printf '%s\n' "$gateway" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+        gateway=""
+fi
+[ "$gateway" = "$old" ] && exit 0
+
+if [ -n "$old" ]; then
+        uci -q del_list "dhcp.@dnsmasq[0].server=$old"
+fi
+if [ -n "$gateway" ]; then
+        uci -q add_list "dhcp.@dnsmasq[0].server=$gateway"
+        printf '%s\n' "$gateway" > "$state"
+else
+        : > "$state"
+fi
+uci -q commit dhcp
+/etc/init.d/dnsmasq reload >/dev/null 2>&1
+exit 0

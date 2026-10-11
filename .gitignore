@@ -1,0 +1,17 @@
+/build_dir/
+/staging_dir/
+/dl/
+/bin/
+/tmp/
+/openwrt/
+/openwrt_packit/
+/output/
+*.img
+*.img.gz
+*.tar.gz
+build.log
+n1-packaging.log
+files/etc/shadow
+files/etc/shadow.*
+/key-build
+/key-build.*

@@ -1,0 +1,7 @@
+#!/bin/sh
+uci -q delete uhttpd.main.listen_https
+uci -q delete uhttpd.main.listen_http
+uci add_list uhttpd.main.listen_http='0.0.0.0:80'
+uci add_list uhttpd.main.listen_http='[::]:80'
+uci commit uhttpd
+exit 0

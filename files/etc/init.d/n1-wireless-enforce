@@ -1,0 +1,102 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=10
+
+ap_is_ready() {
+	local radio="$1" iface info status
+	status="$(ubus call network.wireless status 2>/dev/null)"
+	[ "$(printf '%s' "$status" | jsonfilter -e "@.${radio}.up")" = "true" ] || return 1
+	iface="$(printf '%s' "$status" | jsonfilter -e "@.${radio}.interfaces[0].ifname")"
+	[ -n "$iface" ] || return 1
+	info="$(iw dev "$iface" info 2>/dev/null)" || return 1
+	printf '%s\n' "$info" | grep -q 'type AP' || return 1
+	printf '%s\n' "$info" | grep -q 'channel 149 (5745 MHz), width: 40 MHz' || return 1
+}
+
+wait_for_ap_channel() {
+	local radio="$1" attempt=0 stable=0
+	while [ "$attempt" -lt 30 ]; do
+		if ap_is_ready "$radio"; then
+			stable=$((stable + 1))
+			[ "$stable" -ge 3 ] && return 0
+		else
+			stable=0
+		fi
+		sleep 1
+		attempt=$((attempt + 1))
+	done
+	return 1
+}
+
+start() {
+	local attempt radios radio first_radio ifaces iface first_iface
+
+	# Wait until brcmfmac has registered the N1's SDIO radio.
+	attempt=0
+	while [ "$attempt" -lt 30 ]; do
+		radios="$(uci -q show wireless | sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p')"
+		if [ -n "$radios" ] && [ -d /sys/class/ieee80211/phy0 ]; then
+			break
+		fi
+		sleep 1
+		attempt=$((attempt + 1))
+	done
+
+	if [ -z "$radios" ] || [ ! -d /sys/class/ieee80211/phy0 ]; then
+		logger -t n1-wireless "Radio not ready; leaving wireless config unchanged"
+		return 1
+	fi
+
+	set -- $radios
+	first_radio="$1"
+	for radio in $radios; do
+		if [ "$radio" = "$first_radio" ]; then
+			uci -q set wireless.$radio.disabled='0'
+			uci -q set wireless.$radio.country='CN'
+			uci -q set wireless.$radio.band='5g'
+			uci -q set wireless.$radio.hwmode='11a'
+			uci -q set wireless.$radio.channel='149'
+			uci -q set wireless.$radio.htmode='HT40'
+		else
+			uci -q set wireless.$radio.disabled='1'
+		fi
+	done
+
+	ifaces="$(uci -q show wireless | sed -n 's/^wireless\.\([^.=]*\)=wifi-iface$/\1/p')"
+	set -- $ifaces
+	first_iface="$1"
+	if [ -z "$first_iface" ]; then
+		first_iface="$(uci add wireless wifi-iface)"
+		uci -q set wireless.$first_iface.device="$first_radio"
+		uci -q set wireless.$first_iface.mode='ap'
+		uci -q set wireless.$first_iface.network='lan'
+		uci -q set wireless.$first_iface.ssid='Phicomm_n1'
+		uci -q set wireless.$first_iface.encryption='psk-mixed'
+		uci -q set wireless.$first_iface.key='__N1_WIFI_PASSWORD__'
+	fi
+	for iface in $ifaces; do
+		if [ "$iface" = "$first_iface" ]; then
+			uci -q set wireless.$iface.device="$first_radio"
+			uci -q set wireless.$iface.disabled='0'
+		else
+			uci -q set wireless.$iface.disabled='1'
+		fi
+	done
+
+	uci -q commit wireless
+	# Let netifd finish its initial setup before deciding whether to reload.
+	if wait_for_ap_channel "$first_radio"; then
+		logger -t n1-wireless "Already active: 5 GHz AP channel 149 width 40 MHz; no restart needed"
+		return 0
+	fi
+
+	logger -t n1-wireless "Reloading radio once for 5 GHz channel 149 HT40"
+	/sbin/wifi reload "$first_radio" >/dev/null 2>&1
+	if wait_for_ap_channel "$first_radio"; then
+		logger -t n1-wireless "Verified 5 GHz AP on channel 149 width 40 MHz with netifd up"
+		return 0
+	fi
+	logger -t n1-wireless "ERROR: 5 GHz AP did not start; inspect hostapd/regulatory logs"
+	return 1
+}
