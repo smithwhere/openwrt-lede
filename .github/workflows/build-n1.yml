@@ -100,7 +100,7 @@ jobs:
       - name: Patch N1 packer and register it
         run: |
           python3 packaging/patch-packit.py "$GITHUB_WORKSPACE/packit"
-          sudo ln -s "$GITHUB_WORKSPACE/packit" /opt/openwrt_packit
+          sudo ln -sfn "$GITHUB_WORKSPACE/packit" /opt/openwrt_packit_smithwhere_n1
 
       - name: Package the Phicomm N1 image
         uses: unifreq/openwrt_packit@a46b4f5d201ab99eba0ddc7c2e7cd67412fc3d5c
@@ -108,7 +108,7 @@ jobs:
           OPENWRT_ARMSR: openwrt/bin/targets/armsr/armv8/openwrt-armsr-armv8-generic-rootfs.tar.gz
           PACKAGE_SOC: diy
           SCRIPT_DIY_PATH: packaging/mk-n1.sh
-          SELECT_PACKITPATH: openwrt_packit
+          SELECT_PACKITPATH: openwrt_packit_smithwhere_n1
           SELECT_OUTPUTPATH: output
           KERNEL_VERSION_NAME: 6.18.y
           KERNEL_AUTO_LATEST: "true"
